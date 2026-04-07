@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import bankroll as _bankroll
 import config
 
 _FIELDNAMES = [
@@ -29,6 +30,8 @@ _FIELDNAMES = [
     "projected_pnl",
     "status",
     "actual_pnl",
+    "bankroll_before",
+    "bankroll_after",
     "reasoning",
 ]
 
@@ -45,7 +48,7 @@ def _ensure_headers() -> None:
             writer.writeheader()
 
 
-def log_trades(trades: list[dict], cycle: int) -> None:
+def log_trades(trades: list[dict], cycle: int, bankroll_balance: float) -> None:
     """Append trade decisions to trades.csv as PENDING rows."""
     if not trades:
         return
@@ -54,6 +57,8 @@ def log_trades(trades: list[dict], cycle: int) -> None:
         with _csv_path().open("a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
             for t in trades:
+                before = _bankroll.get_balance()
+                after = _bankroll.deduct_bet(t["bet_size"])
                 writer.writerow({
                     "id": str(uuid.uuid4()),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -69,6 +74,8 @@ def log_trades(trades: list[dict], cycle: int) -> None:
                     "projected_pnl": t["projected_pnl"],
                     "status": "PENDING",
                     "actual_pnl": "",
+                    "bankroll_before": before,
+                    "bankroll_after": after,
                     "reasoning": t["reasoning"],
                 })
     except IOError as e:
@@ -115,6 +122,8 @@ def resolve_trade(trade_id: str, outcome: str) -> None:
     Update a PENDING trade to WON or LOST and compute actual_pnl.
     Rewrites the entire CSV in-place.
     """
+    import bankroll as _bankroll
+
     outcome = outcome.upper()
     if outcome not in ("WON", "LOST"):
         raise ValueError(f"Outcome must be WON or LOST, got: {outcome!r}")
@@ -128,13 +137,23 @@ def resolve_trade(trade_id: str, outcome: str) -> None:
                 return
             t["status"] = outcome
             bet = float(t["bet_size"])
-            prob = float(t["market_prob"])
+            market_prob = float(t["market_prob"])
+            direction = t.get("direction", "BUY_YES")
+
             if outcome == "WON":
-                # payout = bet / market_prob (implied odds), minus the bet itself
-                payout = round(bet / prob - bet, 2) if prob > 0 else 0.0
-                t["actual_pnl"] = payout
+                if direction == "BUY_YES":
+                    payout = round(bet / market_prob, 4) if market_prob > 0 else 0.0
+                else:
+                    no_price = round(1.0 - market_prob, 4)
+                    payout = round(bet / no_price, 4) if no_price > 0 else 0.0
+                actual_pnl = round(payout - bet, 4)
             else:
-                t["actual_pnl"] = -bet
+                payout = 0.0
+                actual_pnl = -bet
+
+            t["actual_pnl"] = actual_pnl
+            new_balance = _bankroll.update_after_trade(payout)
+            t["bankroll_after"] = new_balance
             found = True
             break
 

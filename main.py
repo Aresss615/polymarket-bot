@@ -1,5 +1,5 @@
 """
-Polymarket Simulation Bot — entry point.
+Polymarket Compound Simulation Bot — entry point.
 
 Usage:
     python main.py
@@ -11,7 +11,7 @@ import os
 import time
 import traceback
 
-import anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 import config
@@ -20,10 +20,16 @@ import fetcher
 import analyzer
 import engine
 import logger
+import resolver
+import bankroll
 
 
-def run_cycle(client: anthropic.Anthropic, cycle_num: int) -> None:
-    dashboard.display_info(f"Fetching markets...")
+def run_cycle(client: OpenAI, cycle_num: int) -> None:
+    # Auto-resolve any pending trades that have closed
+    resolved = resolver.auto_resolve()
+    dashboard.display_resolver(resolved)
+
+    dashboard.display_info("Fetching markets...")
     try:
         markets = fetcher.get_markets()
     except Exception as e:
@@ -39,27 +45,35 @@ def run_cycle(client: anthropic.Anthropic, cycle_num: int) -> None:
         dashboard.display_warning("No markets returned. Skipping cycle.")
         return
 
-    dashboard.display_info(f"Analyzing {len(markets)} markets with Claude...")
+    dashboard.display_info(f"Analyzing {len(markets)} markets...")
     analyses = analyzer.analyze_markets(client, markets)
+
+    # Pass end_date from market into analysis for date filtering in engine
+    market_dates = {m["id"]: m.get("end_date") for m in markets}
+    for a in analyses:
+        a["end_date"] = market_dates.get(a["market_id"])
 
     pending_ids = logger.get_pending_market_ids()
     trades = engine.evaluate_trades(analyses, existing_pending=pending_ids)
 
-    logger.log_trades(trades, cycle=cycle_num)
-    portfolio = logger.get_portfolio_summary()
+    current_balance = bankroll.get_balance()
+    logger.log_trades(trades, cycle=cycle_num, bankroll_balance=current_balance)
 
-    dashboard.display_cycle(cycle_num, markets, analyses, trades, portfolio)
+    portfolio = logger.get_portfolio_summary()
+    progress = bankroll.get_progress()
+
+    dashboard.display_cycle(cycle_num, markets, analyses, trades, portfolio, progress)
 
 
 def main() -> None:
     load_dotenv()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        dashboard.display_error("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+        dashboard.display_error("GROQ_API_KEY is not set. Add it to your .env file.")
         return
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=config.GROQ_BASE_URL)
     dashboard.display_startup()
 
     cycle_num = 0
@@ -81,7 +95,8 @@ def main() -> None:
         print()
         dashboard.display_info("Shutting down...")
         portfolio = logger.get_portfolio_summary()
-        dashboard.display_cycle(cycle_num, [], [], [], portfolio)
+        progress = bankroll.get_progress()
+        dashboard.display_cycle(cycle_num, [], [], [], portfolio, progress)
 
 
 if __name__ == "__main__":

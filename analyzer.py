@@ -1,15 +1,26 @@
-import anthropic
+import json
+
+from openai import OpenAI
 import config
 
 _SYSTEM_PROMPT = """\
-You are a calibrated probability estimator for prediction markets. Your job is to estimate the TRUE probability of events, independent of current market prices.
+You are an expert crypto and financial markets trader with deep knowledge of Bitcoin, Ethereum, altcoins, DeFi, macro economics, interest rates, equities, and ETFs. You specialize in short-term prediction markets and have a strong track record of identifying mispricings.
+
+Your job is to estimate the TRUE probability of events, independent of current market prices, using your expertise in:
+- Crypto: on-chain data patterns, BTC halving cycles, ETF flows, regulatory trends, exchange dynamics
+- Macro: Fed rate decisions, CPI prints, employment data, yield curve behavior
+- Equities: earnings momentum, sector rotation, index rebalancing effects
+- Market microstructure: liquidity, sentiment extremes, and mean-reversion tendencies
 
 Rules:
-- Base your estimate on publicly available information up to your knowledge cutoff.
-- Be calibrated: when you say 70%, events should happen ~70% of the time.
-- State "low" confidence when you lack domain knowledge or the question is highly uncertain.
-- Do NOT anchor to the market price provided — form your own independent estimate first.
-- Keep reasoning concise: 2-4 sentences covering the key factors.\
+- Do NOT anchor to the market price — form your independent estimate first, then note if there's a significant gap.
+- Be decisive: lean toward high confidence when your domain expertise clearly applies.
+- For crypto/financial questions, draw on price cycle history, macro context, and on-chain fundamentals.
+- For uncertain or non-financial questions, state "low" confidence.
+- Keep reasoning concise: 2-4 sentences on the key factors driving your estimate.
+
+Always respond with valid JSON in exactly this format:
+{"probability": <float 0.0-1.0>, "confidence": "<low|medium|high>", "reasoning": "<2-4 sentences>"}\
 """
 
 _ANALYSIS_SCHEMA = {
@@ -33,9 +44,9 @@ _ANALYSIS_SCHEMA = {
 }
 
 
-def analyze_market(client: anthropic.Anthropic, market: dict) -> dict:
+def analyze_market(client: OpenAI, market: dict) -> dict:
     """
-    Send a single market to Claude for probability estimation.
+    Send a single market to Gemini for probability estimation.
     Returns an analysis dict merged with market metadata.
     """
     user_prompt = (
@@ -47,18 +58,17 @@ def analyze_market(client: anthropic.Anthropic, market: dict) -> dict:
         f"Estimate the true probability that the YES outcome occurs."
     )
 
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=config.MODEL_NAME,
         max_tokens=config.MAX_TOKENS,
-        system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-        betas=["structured-outputs-2025-11-13"],
-        output_config={"format": "json", "schema": _ANALYSIS_SCHEMA},  # type: ignore[call-overload]
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format={"type": "json_object"},
     )
 
-    result = response.content[0].text  # type: ignore[union-attr]
-    import json
-    data = json.loads(result)
+    data = json.loads(response.choices[0].message.content)
 
     claude_prob = max(0.01, min(0.99, float(data["probability"])))
     edge = round(claude_prob - market["yes_price"], 4)
@@ -74,7 +84,7 @@ def analyze_market(client: anthropic.Anthropic, market: dict) -> dict:
     }
 
 
-def analyze_markets(client: anthropic.Anthropic, markets: list[dict]) -> list[dict]:
+def analyze_markets(client: OpenAI, markets: list[dict]) -> list[dict]:
     """
     Analyze each market. Skips markets that fail without crashing the cycle.
     """
