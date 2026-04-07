@@ -3,6 +3,9 @@ Auto-resolver — polls Gamma API each cycle and resolves PENDING trades
 when their market has closed and a resolution price is available.
 """
 
+import json as _json
+from datetime import datetime, timezone
+
 import requests
 import config
 import bankroll
@@ -22,40 +25,54 @@ def _fetch_market(market_id: str) -> dict | None:
         return None
 
 
+def _is_past_end(market: dict) -> bool:
+    end_date = market.get("endDate") or market.get("end_date")
+    if not end_date:
+        return False
+    try:
+        end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) > end
+    except Exception:
+        return False
+
+
 def _determine_outcome(trade: dict, market: dict) -> str | None:
     """
     Returns 'WON', 'LOST', or None if outcome can't be determined yet.
-    Tries resolutionPrice first, then outcomePrices[0] (first outcome = YES/Up).
+    Resolves when closed=True OR when outcomePrices have settled (≥0.95) past endDate.
     """
-    if not market.get("closed"):
-        return None
+    officially_closed = market.get("closed", False)
+    past_end = _is_past_end(market)
 
-    # Try resolutionPrice (some markets use this)
+    # Try resolutionPrice first
     resolution_price = market.get("resolutionPrice")
     if resolution_price is not None:
         try:
-            res = float(resolution_price)
-            yes_won = res >= 0.5
+            yes_won = float(resolution_price) >= 0.5
         except (ValueError, TypeError):
             yes_won = None
     else:
         yes_won = None
 
-    # Fall back to outcomePrices (5-min crypto Up/Down markets use this)
+    # Use outcomePrices if no resolutionPrice
     if yes_won is None:
-        import json as _json
         outcome_prices = market.get("outcomePrices")
-        if not outcome_prices:
-            return None
-        if isinstance(outcome_prices, str):
-            try:
-                outcome_prices = _json.loads(outcome_prices)
-            except Exception:
-                return None
-        try:
-            yes_won = float(outcome_prices[0]) >= 0.5
-        except (ValueError, TypeError, IndexError):
-            return None
+        if outcome_prices:
+            if isinstance(outcome_prices, str):
+                try:
+                    outcome_prices = _json.loads(outcome_prices)
+                except Exception:
+                    outcome_prices = None
+            if outcome_prices:
+                try:
+                    yes_price = float(outcome_prices[0])
+                    if officially_closed or (past_end and (yes_price >= 0.95 or yes_price <= 0.05)):
+                        yes_won = yes_price >= 0.5
+                except (ValueError, TypeError, IndexError):
+                    pass
+
+    if yes_won is None:
+        return None
 
     direction = trade.get("direction", "BUY_YES")
     if direction == "BUY_YES":

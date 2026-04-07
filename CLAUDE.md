@@ -58,3 +58,31 @@ GROQ_API_KEY=gsk_...
 - LLM knowledge cutoff means sports/short-term markets have no informational edge
 - `projected_pnl` is simplified (`|edge| × bet_size`), not true implied-odds P&L
 - Trade resolution is manual — no auto-resolution when markets close
+
+---
+
+## Planned redesign (approved 2026-04-07, not yet implemented)
+
+**Problem:** Bot was losing on Polymarket's 5-min crypto markets. Root causes:
+1. Timing wrong — woke 1 min *after* each boundary, bet 5-10 min before close
+2. Strategy wrong — LLM has zero edge on short-term crypto price direction
+
+**Approved fix — Hybrid approach:**
+- For crypto interval markets (`*-updown-Xm-*` slugs): skip LLM, use **OKX live price + momentum**
+- Wake **20 seconds before** each 5-min boundary (not 1 min after)
+- Bet only when: live price is clearly above/below strike (>0.2%) AND last 4 candles confirm direction (3/4 same direction)
+- Bet sizing: 5% Kelly of bankroll (scales with wins, no hard $ cap)
+
+**Price feed:** OKX primary (`api.okx.com`), Bybit fallback. **Never Binance** — banned in Philippines.
+
+**Full spec:** `docs/superpowers/specs/2026-04-07-crypto-lastminute-strategy-design.md`
+
+**Files to create/modify:**
+| File | Change |
+|------|--------|
+| `price_feed.py` | NEW — OKX + Bybit spot price and kline momentum |
+| `config.py` | Add `CRYPTO_5MIN_*` constants (`SECONDS_BEFORE_CLOSE=20`, etc.) |
+| `main.py` | Fix `seconds_until_next_cycle()` to wake 20s before boundary |
+| `fetcher.py` | Tag markets as `is_crypto_5min`, switch to seconds-based window |
+| `analyzer.py` | Split path: crypto → price_feed, non-crypto → LLM |
+| `engine.py` | Add `CRYPTO_KELLY_FRACTION` (5%) override for crypto bets |
