@@ -7,6 +7,7 @@ Usage:
 Stop with Ctrl+C.
 """
 
+import datetime
 import os
 import time
 import traceback
@@ -65,14 +66,27 @@ def run_cycle(client: OpenAI, cycle_num: int) -> None:
     dashboard.display_cycle(cycle_num, markets, analyses, trades, portfolio, progress)
 
 
+def seconds_until_next_cycle() -> float:
+    """Wake up SECONDS_BEFORE_CLOSE seconds before the next 5-min boundary."""
+    now = datetime.datetime.now()
+    remainder = now.minute % 5
+    minutes_to_boundary = 5 - remainder if remainder != 0 else 5
+    boundary = now.replace(second=0, microsecond=0) + datetime.timedelta(minutes=minutes_to_boundary)
+    wake_time = boundary - datetime.timedelta(seconds=config.SECONDS_BEFORE_CLOSE)
+    delta = (wake_time - datetime.datetime.now()).total_seconds()
+    while delta < 10:  # need at least 10s to complete a cycle
+        boundary += datetime.timedelta(minutes=5)
+        wake_time = boundary - datetime.timedelta(seconds=config.SECONDS_BEFORE_CLOSE)
+        delta = (wake_time - datetime.datetime.now()).total_seconds()
+    return delta
+
+
 def main() -> None:
     load_dotenv()
 
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        dashboard.display_error("GROQ_API_KEY is not set. Add it to your .env file.")
-        return
-
+        raise SystemExit("Missing GROQ_API_KEY in .env")
     client = OpenAI(api_key=api_key, base_url=config.GROQ_BASE_URL)
     dashboard.display_startup()
 
@@ -86,10 +100,10 @@ def main() -> None:
                 dashboard.display_error(f"Unexpected error in cycle {cycle_num}:")
                 traceback.print_exc()
 
-            dashboard.display_info(
-                f"Next cycle in {config.LOOP_INTERVAL_SECONDS}s. Press Ctrl+C to stop."
-            )
-            time.sleep(config.LOOP_INTERVAL_SECONDS)
+            wait = seconds_until_next_cycle()
+            next_run = (datetime.datetime.now() + datetime.timedelta(seconds=wait)).strftime("%H:%M:%S")
+            dashboard.display_info(f"Next cycle at {next_run} ({wait:.0f}s). Press Ctrl+C to stop.")
+            time.sleep(wait)
 
     except KeyboardInterrupt:
         print()

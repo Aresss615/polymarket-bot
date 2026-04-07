@@ -5,7 +5,7 @@ _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 _MIN_RANK = _CONFIDENCE_RANK[config.MIN_CONFIDENCE]
 
 
-def _kelly_bet(edge: float, market_prob: float, direction: str, balance: float) -> float:
+def _kelly_bet(edge: float, market_prob: float, direction: str, balance: float, kelly_cap: float | None = None) -> float:
     """
     Full Kelly fraction, capped at MAX_KELLY_FRACTION of bankroll.
     For BUY_YES: b = (1/yes_price) - 1, p = claude_prob
@@ -28,7 +28,8 @@ def _kelly_bet(edge: float, market_prob: float, direction: str, balance: float) 
 
     kelly = (b * p - (1.0 - p)) / b
     kelly = max(0.0, kelly)
-    kelly = min(kelly, config.MAX_KELLY_FRACTION)
+    cap = kelly_cap if kelly_cap is not None else config.MAX_KELLY_FRACTION
+    kelly = min(kelly, cap)
 
     return round(kelly * balance, 4)
 
@@ -58,6 +59,7 @@ def evaluate_trades(analyses: list[dict], existing_pending: set[str] | None = No
     pending_ids = existing_pending or set()
     remaining = bankroll.get_balance()
     trades = []
+    crypto_bet_count = 0
 
     for a in analyses:
         if remaining < 0.01:
@@ -66,6 +68,11 @@ def evaluate_trades(analyses: list[dict], existing_pending: set[str] | None = No
         market_id = a["market_id"]
         if market_id in pending_ids:
             continue
+
+        # Cap crypto bets per cycle
+        if a.get("is_crypto_5min"):
+            if crypto_bet_count >= config.CRYPTO_MAX_BETS_PER_CYCLE:
+                continue
 
         # Confidence filter
         if _CONFIDENCE_RANK.get(a["confidence"], 0) < _MIN_RANK:
@@ -77,7 +84,8 @@ def evaluate_trades(analyses: list[dict], existing_pending: set[str] | None = No
             continue
 
         direction = "BUY_YES" if edge > 0 else "BUY_NO"
-        bet_size = _kelly_bet(edge, a["market_prob"], direction, remaining)
+        kelly_cap = config.CRYPTO_KELLY_FRACTION if a.get("is_crypto_5min") else config.MAX_KELLY_FRACTION
+        bet_size = _kelly_bet(edge, a["market_prob"], direction, remaining, kelly_cap=kelly_cap)
 
         if bet_size < 0.01:
             continue
@@ -93,5 +101,7 @@ def evaluate_trades(analyses: list[dict], existing_pending: set[str] | None = No
             "projected_pnl": ev,
         })
         remaining = round(remaining - bet_size, 6)
+        if a.get("is_crypto_5min"):
+            crypto_bet_count += 1
 
     return trades
