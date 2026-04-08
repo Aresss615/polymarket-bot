@@ -69,7 +69,7 @@ GROQ_API_KEY=gsk_...
 
 **Approved fix — Hybrid approach:**
 - For crypto interval markets (`*-updown-Xm-*` slugs): skip LLM, use **OKX live price + momentum**
-- Wake **20 seconds before** each 5-min boundary (not 1 min after)
+- Wake **90 seconds before** each 5-min boundary (not 1 min after)
 - Bet only when: live price is clearly above/below strike (>0.2%) AND last 4 candles confirm direction (3/4 same direction)
 - Bet sizing: 5% Kelly of bankroll (scales with wins, no hard $ cap)
 
@@ -81,8 +81,64 @@ GROQ_API_KEY=gsk_...
 | File | Change |
 |------|--------|
 | `price_feed.py` | NEW — OKX + Bybit spot price and kline momentum |
-| `config.py` | Add `CRYPTO_5MIN_*` constants (`SECONDS_BEFORE_CLOSE=20`, etc.) |
-| `main.py` | Fix `seconds_until_next_cycle()` to wake 20s before boundary |
+| `config.py` | Add `CRYPTO_5MIN_*` constants (`SECONDS_BEFORE_CLOSE=90`, etc.) |
+| `main.py` | Fix `seconds_until_next_cycle()` to wake 90s before boundary |
 | `fetcher.py` | Tag markets as `is_crypto_5min`, switch to seconds-based window |
 | `analyzer.py` | Split path: crypto → price_feed, non-crypto → LLM |
 | `engine.py` | Add `CRYPTO_KELLY_FRACTION` (5%) override for crypto bets |
+
+---
+
+## Implementation log (2026-04-07)
+
+Implemented and shipped:
+
+- Crypto 5-min analyzer now supports momentum fallback via net move when candle majority is unclear.
+- Fetch filtering now applies windows per market type (crypto in seconds, non-crypto in minutes) instead of globally.
+- Added EV quality gate in engine:
+  - `MIN_EV_ROI` in `config.py`
+  - trade must satisfy `projected_pnl / bet_size >= MIN_EV_ROI`
+- Expanded `trades.csv` telemetry:
+  - `ev_roi`, `is_crypto_5min`, `seconds_to_close`, `signal_source`,
+    `momentum_signal`, `net_move_pct`, `live_price`, `strike_price`
+- Added CSV header auto-migration in `logger.py` for backward compatibility.
+- Added weekly calibration tool `calibrate.py` with recommendations for:
+  - `EDGE_THRESHOLD`
+  - `MIN_EV_ROI`
+  - `MOMENTUM_NET_MOVE_FALLBACK` (when enough fallback samples exist)
+
+Run calibration:
+
+```bash
+.venv/bin/python calibrate.py --days 7
+```
+
+## Implementation log (2026-04-08)
+
+Implemented the 30-second crypto recovery plan with directional-bias controls:
+
+- Crypto 5-minute trading now runs in two explicit phases per boundary:
+  - `t30` at `T-30s`
+  - `t15` at `T-15s`
+- Removed generic crypto grace retry; fetch filtering is now phase-aware.
+- Crypto 5-minute markets no longer fall back to the LLM when momentum is unclear.
+- Non-crypto LLM analysis is now side-neutral:
+  - prompt explicitly evaluates YES and NO symmetrically
+  - LLM delta is symmetrically clamped around market price
+  - weak / mixed reasoning is shrunk back toward market
+- Engine now applies:
+  - crypto-specific tier thresholds and size multipliers
+  - recent-side concentration score penalty to reduce `BUY_YES` drift
+  - short-horizon direction-bucket kill switch after repeated losses
+- Trade telemetry expanded with:
+  - `cycle_phase`, `boundary_time`
+  - `direction_bucket`
+  - `side_concentration_penalty_applied`
+  - `reentry_parent_trade_id`
+  - `llm_delta_before_clamp`, `llm_delta_after_clamp`
+- Added regression tests for:
+  - `t30` / `t15` scheduler behavior
+  - no crypto LLM fallback
+  - symmetric LLM calibration
+  - side concentration penalty
+  - short-horizon direction-bucket disable

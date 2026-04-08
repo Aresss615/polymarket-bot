@@ -4,20 +4,65 @@ import config
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
-_CRYPTO_INTERVAL_SLUG = re.compile(
-    r'^(btc|eth|sol|bnb|xrp|doge|avax|link|matic|ada|op|arb)-updown-\d+m-\d+$'
+_ANY_CRYPTO_UPDOWN_SLUG = re.compile(
+    r'^(btc|eth|sol|bnb|xrp|doge|avax|link|matic|ada|op|arb|ltc|dot|trx|ton|shib|pepe|sui|apt|sei)-updown-(\d+)m-\d+$'
 )
 
+
+def _up_outcome_index(question: str, slug: str, outcomes: list[str]) -> int | None:
+    labels = [str(outcome).strip().lower() for outcome in outcomes]
+    for idx, label in enumerate(labels):
+        if "up" in label:
+            return idx
+    for idx, label in enumerate(labels):
+        if "down" in label:
+            return 1 - idx if len(labels) == 2 else None
+    if "-updown-" in (slug or "").lower() or "up or down" in (question or "").lower():
+        return 0
+    return None
+
 def _is_crypto_5min(slug: str) -> bool:
-    return bool(_CRYPTO_INTERVAL_SLUG.match((slug or "").lower()))
+    match = _ANY_CRYPTO_UPDOWN_SLUG.match((slug or "").lower())
+    return bool(match and int(match.group(2)) in {5, 15})
+
+
+def _crypto_interval_minutes(slug: str) -> int | None:
+    match = _ANY_CRYPTO_UPDOWN_SLUG.match((slug or "").lower())
+    if not match:
+        return None
+    return int(match.group(2))
+
+
+def _crypto_max_seconds_to_close(interval_minutes: int | None, cycle_phase: str | None = None) -> int:
+    """Dynamic late-entry window based on interval duration and phase."""
+    if interval_minutes is None:
+        base = config.MAX_SECONDS_TO_CLOSE
+    else:
+        table = getattr(config, "CRYPTO_INTERVAL_ENTRY_SECONDS", {}) or {}
+        if interval_minutes in table:
+            base = int(table[interval_minutes])
+        else:
+            base = config.MAX_SECONDS_TO_CLOSE
+    if cycle_phase == "t30":
+        return min(base, int(getattr(config, "SECOND_CHANCE_SECONDS", 30)))
+    if cycle_phase == "t45":
+        return min(base, int(getattr(config, "SECONDS_BEFORE_CLOSE", 45)))
+    return base
 
 
 def fetch_active_markets() -> list[dict]:
     """Fetch active binary markets from Gamma API, filtered by liquidity and resolve window."""
     now = datetime.now(timezone.utc)
     if getattr(config, "CRYPTO_5MIN_ENABLED", False):
-        floor  = now + timedelta(seconds=config.MIN_SECONDS_TO_CLOSE)
-        cutoff = now + timedelta(seconds=config.MAX_SECONDS_TO_CLOSE)
+        # Combined API window: keep both crypto-seconds and non-crypto-minute candidates.
+        min_minutes = getattr(config, "MIN_MINUTES_TO_RESOLVE", 0)
+        max_minutes = getattr(config, "MAX_MINUTES_TO_RESOLVE", None)
+        floor = now + timedelta(seconds=min(config.MIN_SECONDS_TO_CLOSE, min_minutes * 60 if min_minutes else config.MIN_SECONDS_TO_CLOSE))
+        if max_minutes:
+            cutoff_seconds = max(config.MAX_SECONDS_TO_CLOSE, max_minutes * 60)
+            cutoff = now + timedelta(seconds=cutoff_seconds)
+        else:
+            cutoff = now + timedelta(seconds=config.MAX_SECONDS_TO_CLOSE)
     else:
         min_minutes = getattr(config, "MIN_MINUTES_TO_RESOLVE", 0)
         floor = now + timedelta(minutes=min_minutes) if min_minutes else now
@@ -69,7 +114,8 @@ def fetch_market_price(token_id: str) -> float | None:
         )
         resp.raise_for_status()
         data = resp.json()
-        return float(data.get("mid", 0.5))
+        mid = float(data.get("mid") or 0)
+        return mid if mid > 0 else None
     except Exception:
         return None
 
@@ -89,7 +135,7 @@ def _parse_end_date(end_date: str | None) -> datetime | None:
         return None
 
 
-def _enrich_one(m: dict, now: datetime, cutoff: datetime) -> tuple[dict | None, str | None]:
+def _enrich_one(m: dict, now: datetime, cycle_phase: str | None = None) -> tuple[dict | None, str | None]:
     """
     Enrich a single market dict with its CLOB price.
     Returns (enriched_dict, skip_reason) where skip_reason is one of
@@ -101,6 +147,12 @@ def _enrich_one(m: dict, now: datetime, cutoff: datetime) -> tuple[dict | None, 
         question = (m.get("question") or "").lower()
         slug = (m.get("slug") or "").lower()
         text = question + " " + slug
+
+        any_crypto_updown = _ANY_CRYPTO_UPDOWN_SLUG.match(slug)
+        interval_minutes = _crypto_interval_minutes(slug)
+        configured_crypto_intervals = set((getattr(config, "CRYPTO_INTERVAL_ENTRY_SECONDS", {}) or {}).keys())
+        if any_crypto_updown and interval_minutes not in configured_crypto_intervals:
+            return None, "excluded"
 
         if any(kw.lower() in text for kw in config.MARKET_EXCLUDE_KEYWORDS):
             return None, "excluded"
@@ -119,25 +171,44 @@ def _enrich_one(m: dict, now: datetime, cutoff: datetime) -> tuple[dict | None, 
         outcomes = m.get("_outcomes_parsed", [])
         yes_token_id = tokens[0] if len(tokens) > 0 else None
         no_token_id = tokens[1] if len(tokens) > 1 else None
+        up_outcome_index = _up_outcome_index(m.get("question", ""), slug, outcomes)
 
-        end_date = m.get("endDateIso") or m.get("endDate") or None
+        end_date = m.get("endDate") or m.get("endDateIso") or None
         dt = _parse_end_date(end_date)
         if dt is None:
             return None, "no_date"
-        if dt > cutoff:
-            return None, "too_far"
         seconds_to_close = max(0, int((dt - datetime.now(timezone.utc)).total_seconds()))
-        if getattr(config, "CRYPTO_5MIN_ENABLED", False):
+        is_crypto_5min = _is_crypto_5min(m.get("slug", ""))
+        interval_minutes = _crypto_interval_minutes(m.get("slug", ""))
+
+        if getattr(config, "CRYPTO_5MIN_ENABLED", False) and is_crypto_5min:
+            max_seconds_to_close = _crypto_max_seconds_to_close(interval_minutes, cycle_phase=cycle_phase)
             if seconds_to_close < config.MIN_SECONDS_TO_CLOSE:
                 return None, "too_soon"
+            if seconds_to_close > max_seconds_to_close:
+                return None, "too_far"
         else:
             min_minutes = getattr(config, "MIN_MINUTES_TO_RESOLVE", 0)
+            max_minutes = getattr(config, "MAX_MINUTES_TO_RESOLVE", None)
             if min_minutes and dt < now + timedelta(minutes=min_minutes):
                 return None, "too_soon"
+            if max_minutes and dt > now + timedelta(minutes=max_minutes):
+                return None, "too_far"
 
         yes_price = fetch_market_price(yes_token_id) if yes_token_id else None
         if yes_price is None:
-            yes_price = float(m.get("bestBid") or m.get("lastTradePrice") or 0.5)
+            bid = float(m.get("bestBid") or 0)
+            last = float(m.get("lastTradePrice") or 0)
+            yes_price = bid if bid > 0 else (last if last > 0 else 0.5)
+        no_price = round(1.0 - yes_price, 4)
+        best_bid = float(m.get("bestBid") or 0) or None
+        best_ask = float(m.get("bestAsk") or 0) or None
+        market_spread = None
+        if best_bid is not None and best_ask is not None and best_ask >= best_bid:
+            market_spread = round(best_ask - best_bid, 4)
+        implied_up_prob = round(yes_price, 4)
+        if up_outcome_index == 1:
+            implied_up_prob = no_price
 
         return {
             "id": m.get("id", ""),
@@ -147,19 +218,28 @@ def _enrich_one(m: dict, now: datetime, cutoff: datetime) -> tuple[dict | None, 
             "yes_token_id": yes_token_id,
             "no_token_id": no_token_id,
             "yes_price": round(yes_price, 4),
-            "no_price": round(1.0 - yes_price, 4),
+            "no_price": no_price,
             "liquidity": float(m.get("liquidityNum") or m.get("liquidity") or 0),
             "volume": float(m.get("volumeNum") or m.get("volume") or 0),
             "end_date": end_date,
             "seconds_to_close": seconds_to_close,
-            "is_crypto_5min": _is_crypto_5min(m.get("slug", "")),
+            "is_crypto_5min": is_crypto_5min,
+            "interval_minutes": interval_minutes,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "market_spread": market_spread,
+            "last_trade_price": float(m.get("lastTradePrice") or 0) or None,
+            "up_outcome_index": up_outcome_index,
+            "market_implied_up_prob": implied_up_prob,
+            "display_up_label": "UP",
+            "display_down_label": "DOWN",
         }, None
     except Exception as e:
         print(f"[fetcher] Skipping market {m.get('id', '?')}: {e}")
         return None, "error"
 
 
-def enrich_markets(markets: list[dict]) -> list[dict]:
+def enrich_markets(markets: list[dict], cycle_phase: str | None = None) -> list[dict]:
     """
     Enrich raw Gamma markets with CLOB prices and end date.
     Filters to MAX_DAYS_TO_RESOLVE window in Python (API param unreliable).
@@ -167,17 +247,12 @@ def enrich_markets(markets: list[dict]) -> list[dict]:
     Returns a clean, normalized list of market dicts.
     """
     now = datetime.now(timezone.utc)
-    if getattr(config, "CRYPTO_5MIN_ENABLED", False):
-        cutoff = now + timedelta(seconds=config.MAX_SECONDS_TO_CLOSE)
-    else:
-        minutes = getattr(config, "MAX_MINUTES_TO_RESOLVE", None)
-        cutoff = now + timedelta(minutes=minutes) if minutes is not None else now + timedelta(days=config.MAX_DAYS_TO_RESOLVE)
 
     n_excluded = n_no_date = n_too_far = n_too_soon = 0
     enriched = []
 
     with ThreadPoolExecutor(max_workers=20) as pool:
-        futures = {pool.submit(_enrich_one, m, now, cutoff): m for m in markets}
+        futures = {pool.submit(_enrich_one, m, now, cycle_phase): m for m in markets}
         for future in as_completed(futures):
             result, skip_reason = future.result()
             if skip_reason == "excluded":
@@ -202,7 +277,7 @@ def enrich_markets(markets: list[dict]) -> list[dict]:
     return enriched[:config.MAX_MARKETS_PER_CYCLE]
 
 
-def get_markets() -> list[dict]:
-    """Top-level function: fetch and enrich active markets."""
+def get_markets(cycle_phase: str | None = None) -> list[dict]:
+    """Top-level function: fetch and enrich active markets for the current phase."""
     raw = fetch_active_markets()
-    return enrich_markets(raw)
+    return enrich_markets(raw, cycle_phase=cycle_phase)

@@ -16,6 +16,7 @@ def display_startup() -> None:
     lines = [
         f"[bold]Model:[/bold]          {config.MODEL_NAME}",
         f"[bold]Edge threshold:[/bold] {config.EDGE_THRESHOLD:.0%}",
+        f"[bold]Min EV ROI:[/bold]    {config.MIN_EV_ROI:.0%}",
         f"[bold]Max Kelly:[/bold]      {config.MAX_KELLY_FRACTION:.0%} of bankroll",
         f"[bold]Min confidence:[/bold] {config.MIN_CONFIDENCE}",
         f"[bold]Min liquidity:[/bold]  ${config.MIN_LIQUIDITY:,.0f}",
@@ -35,6 +36,8 @@ def display_cycle(
     trades: list[dict],
     portfolio: dict,
     progress: dict,
+    analysis_skip_summary: dict[str, int] | None = None,
+    engine_rejection_summary: dict[str, int] | None = None,
 ) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     console.print(f"\n[bold cyan]── Cycle {cycle_num}[/bold cyan]  [dim]{now}[/dim]")
@@ -47,6 +50,8 @@ def display_cycle(
     else:
         console.print("[dim]  No trades triggered this cycle.[/dim]")
 
+    _render_skip_summary(analysis_skip_summary or {}, engine_rejection_summary or {})
+
     _render_goal_tracker(progress)
     _render_portfolio(portfolio)
 
@@ -58,12 +63,18 @@ def _render_markets_table(markets: list[dict], analyses: list[dict]) -> None:
         title=f"Markets Analyzed ({len(markets)})",
         box=box.SIMPLE_HEAD,
         show_edge=False,
-        highlight=True,
+        highlight=False,
     )
-    table.add_column("Question", style="white", max_width=48, no_wrap=False)
+    table.add_column("Question", style="white", max_width=40, no_wrap=True)
     table.add_column("Mkt %", justify="right", style="dim")
     table.add_column("AI %", justify="right")
     table.add_column("Edge", justify="right")
+    table.add_column("Window", justify="right", style="dim")
+    table.add_column("L60", justify="right", style="dim")
+    table.add_column("L30", justify="right", style="dim")
+    table.add_column("L15", justify="right", style="dim")
+    table.add_column("Pat", justify="center")
+    table.add_column("Src", justify="center", style="dim")
     table.add_column("Conf", justify="center")
     table.add_column("Days", justify="right", style="dim")
     table.add_column("Liquidity", justify="right", style="dim")
@@ -71,27 +82,36 @@ def _render_markets_table(markets: list[dict], analyses: list[dict]) -> None:
     for m in markets:
         a = analysis_by_id.get(m["id"])
         days = _format_days(m.get("end_date"))
+        market_prob_display = m.get("market_implied_up_prob", m["yes_price"])
         if not a:
             table.add_row(
-                m["question"][:48], f"{m['yes_price']:.0%}", "—", "—", "—",
+                m["question"][:48], f"{market_prob_display:.0%}", "—", "—", "—", "—", "—", "—", "—", "—", "—",
                 days, f"${m['liquidity']:,.0f}",
             )
             continue
 
         edge = a["edge"]
         edge_str = Text(f"{edge:+.1%}")
-        if abs(edge) >= config.EDGE_THRESHOLD:
+        threshold = getattr(config, "CRYPTO_EDGE_THRESHOLD", config.EDGE_THRESHOLD) if a.get("is_crypto_5min") else config.EDGE_THRESHOLD
+        if abs(edge) >= threshold:
             edge_str.stylize("bold green" if edge > 0 else "bold red")
         else:
             edge_str.stylize("dim")
 
         conf_color = {"high": "green", "medium": "yellow", "low": "red"}.get(a["confidence"], "white")
+        ai_prob_display = a.get("probability_up") if a.get("probability_up") is not None else a["claude_prob"]
 
         table.add_row(
             m["question"][:48],
-            f"{m['yes_price']:.0%}",
-            f"{a['claude_prob']:.0%}",
+            f"{market_prob_display:.0%}",
+            f"{ai_prob_display:.0%}",
             edge_str,
+            _format_pct(a.get("window_move_pct")),
+            _format_pct(a.get("last60_move_pct")),
+            _format_pct(a.get("last30_move_pct")),
+            _format_pct(a.get("last15_move_pct")),
+            (a.get("pattern") or "—")[:10],
+            (a.get("data_source") or "—")[:10],
             f"[{conf_color}]{a['confidence']}[/{conf_color}]",
             days,
             f"${m['liquidity']:,.0f}",
@@ -126,22 +146,48 @@ def _render_trades_table(trades: list[dict]) -> None:
     table.add_column("Question", style="white", max_width=40, no_wrap=False)
     table.add_column("Direction", justify="center")
     table.add_column("Edge", justify="right")
+    table.add_column("Window", justify="right", style="dim")
+    table.add_column("L30", justify="right", style="dim")
+    table.add_column("L15", justify="right", style="dim")
+    table.add_column("Pat", justify="center")
+    table.add_column("Src", justify="center", style="dim")
     table.add_column("Bet", justify="right")
     table.add_column("EV", justify="right")
     table.add_column("Conf", justify="center")
 
     for t in trades:
-        direction_color = "green" if t["direction"] == "BUY_YES" else "red"
+        display_direction = t.get("display_direction") or t["direction"]
+        direction_color = "green" if display_direction in {"BUY_YES", "BUY_UP"} else "red"
         table.add_row(
             t["question"][:40],
-            f"[{direction_color}]{t['direction']}[/{direction_color}]",
+            f"[{direction_color}]{display_direction}[/{direction_color}]",
             f"{t['edge']:+.1%}",
+            _format_pct(t.get("window_move_pct")),
+            _format_pct(t.get("last30_move_pct")),
+            _format_pct(t.get("last15_move_pct")),
+            (t.get("pattern") or "—")[:10],
+            (t.get("data_source") or "—")[:10],
             f"${t['bet_size']:.2f}",
             f"${t['projected_pnl']:.2f}",
             t["confidence"],
         )
 
     console.print(table)
+
+
+def _render_skip_summary(analysis_skip_summary: dict[str, int], engine_rejection_summary: dict[str, int]) -> None:
+    if not analysis_skip_summary and not engine_rejection_summary:
+        return
+
+    lines = []
+    if analysis_skip_summary:
+        analysis_bits = [f"{reason}={count}" for reason, count in analysis_skip_summary.items()]
+        lines.append("[bold]Analysis skips:[/bold] " + "  ".join(analysis_bits))
+    if engine_rejection_summary:
+        engine_bits = [f"{reason}={count}" for reason, count in engine_rejection_summary.items()]
+        lines.append("[bold]Engine rejects:[/bold] " + "  ".join(engine_bits))
+
+    console.print(Panel("\n".join(lines), title="Cycle Reasons", border_style="dim", padding=(0, 1)))
 
 
 def _render_goal_tracker(progress: dict) -> None:
@@ -206,3 +252,12 @@ def display_warning(msg: str) -> None:
 
 def display_info(msg: str) -> None:
     console.print(f"[dim]{msg}[/dim]")
+
+
+def _format_pct(value) -> str:
+    if value in (None, ""):
+        return "—"
+    try:
+        return f"{float(value):+.2%}"
+    except Exception:
+        return "—"
