@@ -13,7 +13,7 @@ CRYPTO_TAIL_MIN_EV_ROI = 0.001       # Lower EV floor for extreme late crypto ta
 MAX_KELLY_FRACTION = 0.40       # Cap Kelly bet at 40% of bankroll
 MIN_CONFIDENCE = "medium"       # Minimum confidence level: "low", "medium", "high"
 MIN_EV_ROI = 0.005              # Minimum EV/bet ratio (0.5%) required to place a trade
-LLM_TRADING_ENABLED = False     # Disabled: 16% win rate, Llama 8b has no edge
+LLM_TRADING_ENABLED = True      # Enabled: allow non-crypto paper trades again
 RELAXED_PASS_ENABLED = False    # Disabled alongside LLM trading
 RELAXED_EDGE_MULTIPLIER = 0.5   # Relaxed edge threshold = EDGE_THRESHOLD * multiplier
 RELAXED_EV_ROI_MULTIPLIER = 0.5 # Relaxed EV ROI floor = MIN_EV_ROI * multiplier

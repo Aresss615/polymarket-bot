@@ -364,7 +364,7 @@ def evaluate_trades(
             _record_rejection(a, "confidence_below_min")
             continue
 
-        if a.get("cycle_phase") == "t45":
+        if a.get("cycle_phase") == "t45" and int(a.get("interval_minutes") or 0) == 5:
             _record_rejection(a, "observe_only_phase")
             continue
 
