@@ -103,7 +103,7 @@ def _time_proximity_score(a: dict) -> float:
         return 0.5
 
     interval = a.get("interval_minutes")
-    if isinstance(interval, int):
+    if a.get("is_crypto_5min") and isinstance(interval, int):
         max_window = getattr(config, "CRYPTO_INTERVAL_ENTRY_SECONDS", {}).get(interval)
         if max_window is None:
             max_window = config.MAX_SECONDS_TO_CLOSE
@@ -112,7 +112,10 @@ def _time_proximity_score(a: dict) -> float:
         if a.get("is_crypto_5min"):
             max_window += int(getattr(config, "CRYPTO_ENTRY_GRACE_SECONDS", 0) or 0)
     else:
-        max_window = config.MAX_SECONDS_TO_CLOSE
+        # Non-crypto markets are filtered in minutes, so score against that window.
+        max_minutes = int(getattr(config, "MAX_MINUTES_TO_RESOLVE", 10) or 10)
+        min_minutes = int(getattr(config, "MIN_MINUTES_TO_RESOLVE", 0) or 0)
+        max_window = max(60, max_minutes * 60 - min_minutes * 60)
 
     max_window = max(1.0, float(max_window))
     score = 1.0 - min(seconds_to_close / max_window, 1.0)

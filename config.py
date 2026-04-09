@@ -4,7 +4,7 @@ MAX_TOKENS = 1024
 API_BASE_URL = "http://localhost:11434/v1"
 
 # === Trading Strategy ===
-EDGE_THRESHOLD = 0.02           # Minimum |edge| to trigger a trade (2%)
+EDGE_THRESHOLD = 0.01           # Minimum |edge| to trigger a trade (1%)
 CRYPTO_EDGE_THRESHOLD = 0.015   # Lower general edge floor for crypto interval markets
 CRYPTO_TAIL_EDGE_THRESHOLD = 0.005  # Lower edge threshold for extreme crypto tail markets
 CRYPTO_TAIL_MARKET_PROB_CUTOFF = 0.05  # Treat <=5% or >=95% YES as tail markets
@@ -12,14 +12,14 @@ CRYPTO_TAIL_TIER_B_THRESHOLD = 0.18  # Allow small but actionable extreme-tail s
 CRYPTO_TAIL_MIN_EV_ROI = 0.001       # Lower EV floor for extreme late crypto tail setups
 MAX_KELLY_FRACTION = 0.40       # Cap Kelly bet at 40% of bankroll
 MIN_CONFIDENCE = "medium"       # Minimum confidence level: "low", "medium", "high"
-MIN_EV_ROI = 0.005              # Minimum EV/bet ratio (0.5%) required to place a trade
+MIN_EV_ROI = 0.002              # Minimum EV/bet ratio (0.2%) required to place a trade
 LLM_TRADING_ENABLED = True      # Enabled: allow non-crypto paper trades again
 RELAXED_PASS_ENABLED = False    # Disabled alongside LLM trading
 RELAXED_EDGE_MULTIPLIER = 0.5   # Relaxed edge threshold = EDGE_THRESHOLD * multiplier
 RELAXED_EV_ROI_MULTIPLIER = 0.5 # Relaxed EV ROI floor = MIN_EV_ROI * multiplier
 RELAXED_MAX_TRADES = 1          # Max trades placed by relaxed pass
 RELAXED_ALLOW_LOW_CONF_CRYPTO = False # Do not allow low-confidence crypto trades
-TOP_TRADES_PER_CYCLE = 3        # Rank candidates by quality score, then take top N
+TOP_TRADES_PER_CYCLE = 5        # Rank candidates by quality score, then take top N
 SCORE_WEIGHTS = {               # Weights must sum near 1.0
     "edge": 0.30,
     "ev_roi": 0.25,
@@ -28,8 +28,8 @@ SCORE_WEIGHTS = {               # Weights must sum near 1.0
     "signal": 0.15,
 }
 QUALITY_TIER_THRESHOLDS = {     # Score cutoffs
-    "A": 0.70,                  # Full sizing
-    "B": 0.40,                  # Reduced sizing
+    "A": 0.62,                  # Full sizing
+    "B": 0.30,                  # Reduced sizing
 }
 TIER_SIZE_MULTIPLIERS = {
     "A": 1.0,
@@ -66,28 +66,12 @@ MAX_MARKETS_PER_CYCLE = 16      # Wider crypto funnel so more tradable names sur
 # === Market Selection ===
 MIN_DAYS_TO_RESOLVE = 0         # Allow intraday markets (hourly crypto, etc.)
 MAX_DAYS_TO_RESOLVE = 7         # Skip markets resolving in >7 days (short-term only)
-MIN_MINUTES_TO_RESOLVE = 3      # Ignore markets closing in less than 3 minutes (too late to bet)
-MAX_MINUTES_TO_RESOLVE = 10     # Only target markets closing within next 10 minutes
-MIN_LIQUIDITY = 2500            # Lower floor so more altcoin 5m markets are eligible
+MIN_MINUTES_TO_RESOLVE = 2      # Ignore markets closing in less than 2 minutes (too late to bet)
+MAX_MINUTES_TO_RESOLVE = 90     # Include more non-crypto short-horizon opportunities
+MIN_LIQUIDITY = 1000            # Broader market funnel while avoiding very illiquid books
 
 # Keywords to INCLUDE — markets where LLM has genuine reasoning edge
-MARKET_FOCUS_KEYWORDS = [
-    # Crypto
-    "bitcoin", "btc", "ethereum", "eth", "crypto", "altcoin", "defi", "nft",
-    "solana", "sol", "xrp", "ripple", "dogecoin", "doge", "bnb", "binance",
-    "litecoin", "ltc", "polkadot", "dot", "tron", "trx", "toncoin", "ton",
-    "shiba", "shib", "pepe", "sui", "aptos", "apt", "sei",
-    "coinbase", "blackrock", "etf", "spot etf", "halving", "blockchain",
-    "stablecoin", "usdc", "tether", "on-chain", "layer 2", "l2",
-    # Macro / finance
-    "fed", "federal reserve", "rate", "interest rate", "rate cut", "rate hike",
-    "inflation", "cpi", "pce", "gdp", "recession", "yield", "treasury",
-    "dollar", "usd", "eur", "forex", "oil", "gold", "silver", "commodities",
-    # Equities
-    "stock", "s&p", "nasdaq", "dow", "ipo", "earnings", "market cap",
-    "apple", "tesla", "nvidia", "microsoft", "amazon", "google", "meta",
-    "sec", "regulatory", "approval", "listing",
-]
+MARKET_FOCUS_KEYWORDS = []      # Empty list = trade across all categories (except excludes below)
 
 # Keywords to EXCLUDE — real-time sports/games where LLM has no edge
 MARKET_EXCLUDE_KEYWORDS = [
